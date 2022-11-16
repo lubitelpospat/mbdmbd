@@ -29,63 +29,74 @@ pub struct Nanopolish {
     pub end_idx: Vec<u64>,
 }
 
-pub struct TidGid {
-    pub transcripts: Vec<String>,
-    pub genes: Vec<String>,
-}
-impl TidGid {
-    pub fn tid_to_gid(&self, tID: String) -> Vec<&String> {
-        let indices = self.transcripts
-            .iter()
-            .enumerate()
-            .filter_map(|(index, r)| if r == &tID { Some(index) } else { None })
-            .collect::<Vec<_>>();
-        return indices.iter().map(|i| &self.genes[*i]).collect::<Vec<_>>();
-    }
-}
-
 pub struct GtfExons {
     pub transcripts: Vec<String>,
-    pub exon_number: Vec<u8>,
-    pub chr: Vec<u8>,
+    pub genes: Vec<String>,
+    pub exon_number: Vec<u32>,
+    pub chr: Vec<String>,
     pub start: Vec<u64>,
     pub end: Vec<u64>,
     pub strand: Vec<char>,
 }
 impl GtfExons {
-    pub fn t_pos_to_g_pos(&self, transcript_id: String, t_pos: u64) -> u64 {
+    pub fn tid_to_gid(&self, t_id: &String) -> Vec<&String> {
+        let indices = self.transcripts
+            .iter()
+            .enumerate()
+            .filter_map(|(index, r)| if r == t_id { Some(index) } else { None })
+            .collect::<Vec<_>>();
+        return indices.iter().map(|i| &self.genes[*i]).collect::<Vec<_>>();
+    }
+
+    pub fn tid_to_chrom(&self, t_id: &String) -> Vec<&String> {
+    	let indices = self.transcripts
+    		.iter()
+    		.enumerate()
+    		.filter_map(|(index, r)| if r == t_id { Some(index) } else { None })
+    		.collect::<Vec<_>>();
+    	return indices.iter().map(|i| &self.chr[*i]).collect::<Vec<_>>();
+    }
+
+    pub fn tpos_to_gpos(&self, transcript_id: &String, t_pos: u64) -> (String, u64) {
+    	let mut chr: String = "".to_string();
         let mut g_pos: u64 = 0;
         // get all indices which match transcript
         let t_ind = self.transcripts
             .iter()
             .enumerate()
-            .filter_map(|(index, r)| if r == &transcript_id { Some(index) } else { None })
+            .filter_map(|(index, r)| if r == transcript_id { Some(index) } else { None })
             .collect::<Vec<_>>();
         let mut cumsum: u64 = 0;
         for t in t_ind{
             // there should only be one strand per transcript... I hope
             // I also hope exons within same gene cannot be overlapping :3
             let strand = self.strand[t];
-            // this should start at the lowest exon number...
-            let exon_len = self.end[t] - self.start[t];
-            cumsum += exon_len;
-            // if THIS POSITION is WITHIN this transcript
-            if t_pos > self.start[t] && t_pos < self.end[t] {
-                // send output
-                if strand == '+' {
-                    g_pos = &self.start[t] + &t_pos;
-                } else if strand == '-' {
-                    g_pos = &self.end[t] - &t_pos;
-                }
+            // check if tpos is in this exon, exons count up
+            // equal to incl 0, it is first exon
+            if t_pos >= cumsum {
+            	// if we are IN this exon
+	            chr = self.chr[t].clone();
+	            let start: u64 = self.start[t];
+	            let end: u64 = self.end[t];
+	            // send output
+	            if strand == '+' {
+	                g_pos = t_pos - cumsum + start;
+	            } else if strand == '-' {
+	                g_pos = t_pos - cumsum + start;
+	            }        	
+            } else {
+            	// if we are not, cumulate lengths
+            	let exon_len = self.end[t] - self.start[t];
+            	cumsum += exon_len;
             }
         }
-        return g_pos;
+        (chr, g_pos)
     }
 }
 
 pub struct Sequence {
-    pub chr: String,
-    pub start: u64,
-    pub end: u64,
-    pub seq: Vec<char>,
+    pub chr: Vec<String>,
+    pub start: Vec<u64>,
+    pub end: Vec<u64>,
+    pub seq: Vec<String>,
 }
