@@ -50,7 +50,7 @@ fn main() -> std::io::Result<()> {
 	let rg = Regex::new(r"\..*$").unwrap();
 	// iter
 	for (idx, line) in lines.enumerate() {
-		if idx > 999 && idx < 1009 {// > npa_path.headsize.into() {
+		if idx > npa_path.headsize.into() {
 			let cols: Vec<&str> = line.split('\t').collect();
 			if !cols[0].is_empty(){
 			    // get these: 
