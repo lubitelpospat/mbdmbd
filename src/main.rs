@@ -8,13 +8,14 @@ use regex::Regex;
 use substring::Substring;
 use std::collections::HashMap;
 
-fn main() {
+fn main() -> std::io::Result<()> {
     // first we need paths to the nanopolish and genome files
     let npa_path: FilePath = FilePath::new("./data-files/mouse_antiadar_eventalign.txt", 1);
     let npb_path: FilePath = FilePath::new("./data-files/mouse_scramble_eventalign.txt", 1);
     let gtf_path: FilePath = FilePath::new("./data-files/Mus_musculus.GRCm39.107.gtf", 5);
     let traome_path: FilePath = FilePath::new("./data-files/Mus_musculus.GRCm39.cdna.all.fa", 0);
 	let genome_path: FilePath = FilePath::new("./data-files/Mus_musculus.GRCm39.dna.toplevel.fa", 0);
+	let output_path: &str = "./hashmap.txt";
 
     // then we need to read those into memory
 
@@ -91,8 +92,10 @@ fn main() {
 					.entry(refkmer)
 					.and_modify(|dist| dist.push(evmean) )
 					.or_insert(new_v);
-			    println!("{:?}", kmer_distros);
 			}			
 		}
 	}
+	//println!("{:?}", kmer_distros);
+	fs::write(output_path, format!("{:?}", kmer_distros))?;
+	Ok(())
 }
