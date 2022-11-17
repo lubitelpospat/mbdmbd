@@ -2,6 +2,7 @@
 
 import sys
 import os
+import math
 from argparse import ArgumentParser
 # dataframes
 import pandas as pd
@@ -98,16 +99,25 @@ def load_nanopolish(path):
 def kmer_event_dist(k, npAny, rand):
     vals = npAny[npAny['model_kmer'] == k]
     s = np.mean(vals['event_stdv'])
-    l = np.mean(vals['event_length'])
+    x = np.mean(vals['event_length'])
+    if math.isnan(x) or x in ['nan', np.nan, ... ]:
+        x = .01
+    # sample frequency is the number hardcoded here
+    l = round(x*3000)
     m = np.mean(vals['event_level_mean'])
-    return s * rand.standard_normal(l) + m
+    dist = s * rand.standard_normal(l) + m
+    return dist
     
 def kmer_model_dist(k, npAny, rand):
     vals = npAny[npAny['model_kmer'] == k]
     s = np.mean(vals['model_stdv'])
-    l = 10
+    l = 30
     m = np.mean(vals['model_mean'])
-    return s * rand.standard_normal(l) + m
+    dist = s * rand.standard_normal(l) + m
+    return dist
+
+def check_na(x):
+    return math.isnan(x[0]) or x[0] in ['nan', np.nan, ... ]
 
 def main(argv=sys.argv):
 #if True:
@@ -133,12 +143,15 @@ def main(argv=sys.argv):
         distA = kmer_event_dist(k, npA, rng)
         distB = kmer_event_dist(k, npB, rng)
         model_dist = kmer_model_dist(k, model, rng)
-
-        fig, axs = plt.subplots(1, 2, 3, sharey=True, tight_layout=True)
-        axs[0].hist(distA, bins=n_bins)
-        axs[1].hist(distB, bins=n_bins)
-        axs[2].hist(model_dist, bins=n_bins)
-        plt.savefig(os.path.join(args.outputDir, k+".png"))
+        if not check_na(distA) | check_na(distB):
+            fig, axs = plt.subplots(1, 2, sharey=True, tight_layout=True)
+            axs[0].hist(distA, bins=n_bins)
+            axs[1].hist(distB, bins=n_bins)
+            #axs[2].hist(model_dist, bins=n_bins)
+            fn = os.path.join(args.outputDir, k+".png")
+            print(fn)
+            plt.savefig(fn)
+            plt.clf()
     
 if __name__=="__main__":
     main(sys.argv)
