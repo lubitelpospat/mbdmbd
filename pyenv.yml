@@ -87,4 +87,10 @@ dependencies:
   - zict=2.1.0=py310h6ffa863_0
   - zlib=1.2.13=hf118e41_0
   - zstd=1.5.2=hc52992f_0
+  - pip:
+    - argcomplete==2.0.0
+    - argh==0.26.2
+    - gffutils==0.11.1
+    - pyfaidx==0.7.1
+    - simplejson==3.18.0
 prefix: /home/liam/miniconda3/envs/mbdmbd

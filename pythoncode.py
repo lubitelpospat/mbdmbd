@@ -3,12 +3,19 @@
 import sys
 import os
 from argparse import ArgumentParser
+# dataframes
 import pandas as pd
 import numpy as np
 from dask import dataframe as dd
 from dask import compute
+# bars
 from tqdm import tqdm
 tqdm.pandas()
+from dask.diagnostics import ProgressBar
+# plots
+import matplotlib.pyplot as plt
+from matplotlib import colors
+from matplotlib.ticker import PercentFormatter
 
 ############### args
 def getArgs(argv):
@@ -27,11 +34,111 @@ def getArgs(argv):
     parser.set_defaults()
     return parser.parse_args(argv[1:])
 
-#def main(argv=sys.argv):
-if True:
-    argv=sys.argv
+def importGtf(path):
+    ###### gtf #######
+    num_lines = sum(1 for line in open(path, 'r'))
+    rows = []
+    with open(path, 'r') as f:
+        for idx, line in enumerate(tqdm(f, total=num_lines)):
+            # skip header and only get exons
+            if idx > 4:
+                if line.split('\t')[2] == "exon":
+                    start = line.split('\t')[3]
+                    end = line.split('\t')[4]
+                    strand = line.split('\t')[6]
+                    fields = line.split('\t')[8]
+                    for f in fields.split("; "):
+                        if f.split(' ')[0] == "gene_id":
+                            gene = f.split(' ')[1].strip('\"')
+                        if f.split(' ')[0] == "transcript_id":
+                            transcript = f.split(' ')[1].strip('\"')
+                        if f.split(' ')[0] == "exon_number":
+                            exon_num = f.split(' ')[1].strip('\"')
+                    ## build row
+                    row = pd.Series(data={
+                        'geneID': gene,
+                        'transcriptID': transcript,
+                        'start': start,
+                        'end': end,
+                        'strand': strand,
+                        'exon_number': exon_num
+                    })
+                    ## send to list 
+                    rows.append(row)
+    return pd.concat(rows)
+
+def load_nanopolish(path):
+    ###### nanopolish #######
+    ##### cols as follows ###
+    # contig	position	reference_kmer	read_index	strand	
+    # event_index	event_level_mean	event_stdv	event_length	
+    # model_kmer	model_mean  model_stdv  standardized_level  
+    # start_idx   end_idx
+    #########################
+    col_list = [
+        "model_kmer", 
+        "event_level_mean", 
+        "event_stdev", 
+        "event_length"]
+    col_typedict = {
+        'model_kmer': str, 
+        'event_level_mean': np.float32, 
+        'event_stdev': np.float32, 
+        'event_length': np.float32}
+    npdd = dd.read_table(path, 
+        delimiter='\t', 
+        usecols = col_list, 
+        dtype=col_typedict, 
+        #low_memory=True,
+        blocksize=25e6)
+    with ProgressBar():
+        np = npdd.compute()
+    return np
+
+def kmer_event_dist(k, np, rand):
+    vals = np[np['model_kmer'] == k]
+    s = np.mean(vals['event_stdev'])
+    l = np.mean(vals['event_length'])
+    m = np.mean(vals['event_mean'])
+    return s * rand.standard_normal(l) + m
+    
+def kmer_model_dist(k, np, rand):
+    vals = np[np['model_kmer'] == k]
+    s = np.mean(vals['model_stdev'])
+    l = 10
+    m = np.mean(vals['model_mean'])
+    return s * rand.standard_normal(l) + m
+
+def main(argv=sys.argv):
+#if True:
+#    argv=sys.argv
     ###
     args = getArgs(argv)
 
-#if __name__=="__main__":
-#    main(sys.argv)
+    if not os.path.exists(args.outputDir):
+        os.mkdir(args.outputDir)
+    # are we using this?
+    #gtf = importGtf(args.gtfPath)
+
+    npA = load_nanopolish(args.npA)
+    npB = load_nanopolish(args.npB)
+    
+    ## load in model
+    model = pd.read_csv('model_kmer.csv')    
+    # Create a random number generator with a fixed seed for reproducibility
+    rng = np.random.default_rng(19680801)
+    # histogram bins
+    n_bins = 10
+    for k in pd.unique(model['model_kmer']):
+        distA = kmer_event_dist(k, npA, rng)
+        distB = kmer_event_dist(k, npB, rng)
+        model_dist = kmer_model_dist(k, model, rng)
+
+        fig, axs = plt.subplots(1, 2, 3, sharey=True, tight_layout=True)
+        axs[0].hist(distA, bins=n_bins)
+        axs[1].hist(distB, bins=n_bins)
+        axs[2].hist(model_dist, bins=n_bins)
+        plt.savefig(os.path.join(args.outputDir, k+".png"))
+    
+if __name__=="__main__":
+    main(sys.argv)

@@ -78,8 +78,7 @@ fn main() -> std::io::Result<()> {
 			    let gkmer = genome_fa.seq[g_idx].substring(gs,ge);
 			    // check kmer matches
 			    if refkmer != tkmer || refkmer != gkmer || tkmer != gkmer {
-					println!("WOAH THERE, the kmers don't match");
-			    	exit(0);
+					println!("WOAH THERE, the kmers don't match \n ref {}, tran {}, gen {}", refkmer, tkmer, gkmer);
 			    }
 			    // store mean somehow
 			    // event mean
