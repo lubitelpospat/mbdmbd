@@ -99,7 +99,7 @@ def kmer_event_dist(k, npAny, rand):
     vals = npAny[npAny['model_kmer'] == k]
     s = np.mean(vals['event_stdv'])
     l = np.mean(vals['event_length'])
-    m = np.mean(vals['event_mean'])
+    m = np.mean(vals['event_level_mean'])
     return s * rand.standard_normal(l) + m
     
 def kmer_model_dist(k, npAny, rand):
