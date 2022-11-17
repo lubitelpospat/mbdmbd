@@ -92,18 +92,18 @@ def load_nanopolish(path):
         #low_memory=True,
         blocksize=25e6)
     with ProgressBar():
-        np = npdd.compute()
-    return np
+        npAny = npdd.compute()
+    return npAny
 
-def kmer_event_dist(k, np, rand):
-    vals = np[np['model_kmer'] == k]
+def kmer_event_dist(k, npAny, rand):
+    vals = npAny[npAny['model_kmer'] == k]
     s = np.mean(vals['event_stdev'])
     l = np.mean(vals['event_length'])
     m = np.mean(vals['event_mean'])
     return s * rand.standard_normal(l) + m
     
-def kmer_model_dist(k, np, rand):
-    vals = np[np['model_kmer'] == k]
+def kmer_model_dist(k, npAny, rand):
+    vals = npAny[npAny['model_kmer'] == k]
     s = np.mean(vals['model_stdev'])
     l = 10
     m = np.mean(vals['model_mean'])
