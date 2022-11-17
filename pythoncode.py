@@ -78,12 +78,12 @@ def load_nanopolish(path):
     col_list = [
         "model_kmer", 
         "event_level_mean", 
-        "event_stdev", 
+        "event_stdv", 
         "event_length"]
     col_typedict = {
         'model_kmer': str, 
         'event_level_mean': np.float32, 
-        'event_stdev': np.float32, 
+        'event_stdv': np.float32, 
         'event_length': np.float32}
     npdd = dd.read_table(path, 
         delimiter='\t', 
@@ -97,14 +97,14 @@ def load_nanopolish(path):
 
 def kmer_event_dist(k, npAny, rand):
     vals = npAny[npAny['model_kmer'] == k]
-    s = np.mean(vals['event_stdev'])
+    s = np.mean(vals['event_stdv'])
     l = np.mean(vals['event_length'])
     m = np.mean(vals['event_mean'])
     return s * rand.standard_normal(l) + m
     
 def kmer_model_dist(k, npAny, rand):
     vals = npAny[npAny['model_kmer'] == k]
-    s = np.mean(vals['model_stdev'])
+    s = np.mean(vals['model_stdv'])
     l = 10
     m = np.mean(vals['model_mean'])
     return s * rand.standard_normal(l) + m
