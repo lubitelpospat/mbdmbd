@@ -96,6 +96,8 @@ def load_nanopolish(path):
         "event_level_mean", 
         "event_stdv", 
         "event_length",
+        "model_mean", 
+        "model_stdv", 
         "start_idx",
         "end_idx"]
     col_typedict = {
@@ -107,6 +109,8 @@ def load_nanopolish(path):
         'read_index': int,
         'event_level_mean': np.float32, 
         'event_stdv': np.float32, 
+        'model_mean': np.float32,
+        'model_stdv': np.float32,
         'event_length': np.float32,
         'start_idx': int,
         'end_idx': int}
@@ -132,32 +136,26 @@ def load_nanopolish_summary(path):
         npsOut = nps.compute()
     return npsOut
 
-def check_na(x):
-    return math.isnan(x[0]) or x[0] in ['nan', np.nan, ... ]
-
-def test_np_row_model(x, model):
-    model = model[model['model_kmer'] == x['model_kmer']]
-    ### two sample t-test
-    # need means and stdev and samplesize
-    x_m = x['event_level_mean']
-    x_s = x['event_stdv']
-    x_l = x['end_idx']-x['start_idx']
-    # model
-    y_m = model['model_mean']
-    y_s = model['model_stdv']
-    y_l = x_l
-    ### PERFORM TEST
-    stat, pval = stats.ttest_ind_from_stats(x_m, x_s, x_l, y_m, y_s, y_l,
-        equal_var = False)
-    return pd.Series(data={
-        't-stat': stat[0], 
-        'pval': pval[0]})
-
 def np_stat(x):
     x_m = x['event_level_mean']
     x_s = x['event_stdv']
     x_l = x['end_idx']-x['start_idx']
     return x_m, x_s, x_l
+
+def test_np_row_model(x):
+    ### two sample t-test
+    # need means and stdev and samplesize
+    x_m, x_s, x_l = np_stat(x)
+    # model
+    y_m = x['model_mean']
+    y_s = x['model_stdv']
+    y_l = x_l
+    ### PERFORM TEST
+    stat, pval = stats.ttest_ind_from_stats(x_m, x_s, x_l, y_m, y_s, y_l,
+        equal_var = False)
+    return pd.Series(data={
+        't-stat': stat, 
+        'pval': pval})
 
 def test_np_row_row(x, yDF):
     y = yDF[x.name == yDF.index]
@@ -172,17 +170,20 @@ def test_np_row_row(x, yDF):
         't-stat': stat[0], 
         'pval': pval[0]})
 
-def isInPair(x, npAny):
-    return any(x.name == npAny.index)
-
 def find_indices_of_substring(fs, ss):
     return [index for index in range(len(fs)) if fs.startswith(ss, index)]
 
-def extractMappingPos(bam, npAny):
-    mappingHolder = dict()
+def isInPair(x, npAny):
+    return any(x.name == npAny.index)
+
+def extractCigarMappos(bam):
+    cigarHolder = dict()
+    mappingPosHolder = dict()
     for read in tqdm(bam.fetch(until_eof=True)):
-        mappingHolder[str(read.qname)] = str(read.cigarstring)
-    return npAny['read_name'].map(mappingHolder)
+        if not read.is_secondary | read.is_supplementary:
+            cigarHolder[str(read.qname)] = str(read.cigarstring)
+            mappingPosHolder[str(read.qname)] = int(str(read).split('\t')[3])
+    return cigarHolder, mappingPosHolder
 
 def extractFast5data(x):
     rn = "read_" + x['read_name']
@@ -192,7 +193,7 @@ def extractFast5data(x):
     move = f[rn]['Analyses']['Basecall_1D_001']['BaseCalled_template']['Move'][...]
     return pd.Series(data={'sequence': sequence, 'f5signal': trace, 'f5segmentation': move})
 
-def parseCIGARsubsetF5(x):
+def getCIGARsubsetF5(x):
     # 6. CIGAR: CIGAR string. The CIGAR operations are given in the following table (set ‘*’ if unavailable):
     # Op BAM  Description                              Consumes-query  Consumes-reference
     # M 0   alignment match (can be a sequence match or mismatch)   yes yes
@@ -209,27 +210,30 @@ def parseCIGARsubsetF5(x):
     f5data = extractFast5data(x)
     # loop over each cigar op, apply it to the full seq string, produce the alignment string
     strindex = []
-    cursor = 0
+    # this tracks the position in ref and read, it's what we build index from
+    read_cursor = 0
+    ref_cursor = 0
     for c in Cigar(x['cigar']).items():
+        # number and opcode
         N, Op = c
+        ############################################
+        ############## handle opcodes ##############
+        ############################################
         if Op == 'M':
-            strindex.append(int(cursor))
             # since this is match we just append +1 repeatedly
             for i in range(N):
-                last = strindex[-1]
-                strindex.append(int(last+1))
+                ref_cursor += 1
+                read_cursor += 1
+                strindex.append(ref_cursor)
         elif Op == 'D':
             # gap in the ref
-            # I can ignore this because I just want to know 
-            # which parts of the read map to which parts of the ref? 
-            # nanopolish already has genomic position so I think I'm ok
-            continue
+            ref_cursor += N
         elif Op == 'I':
             # gap in the read
-            cursor += 1
+            read_cursor += N
         elif Op == 'S':
             # used in soft clipping, so the whole-ass seq is in bam but we ignore N of it
-            cursor = N
+            ref_cursor += N
         elif Op == 'H':
             # for Hard clipping, so the truncated seq appears in bam
             print("I hope this doesn't print because then it means I don't understand something")
@@ -241,14 +245,16 @@ def parseCIGARsubsetF5(x):
     for i in strindex:
         sequence = sequence + f5data.sequence[i]
         signal.append(f5data.f5signal[f5data.f5segmentation == 1][i])
-    return sequence, np.array(signal)
+    # convert seq to dna
+    pairs = { "A":"A", "C":"C", "G":"G", "U":"T" }
+    seqDNA = ''.join([pairs[b] for b in sequence])
+    return pd.Series(data={'str': seqDNA, 'sig': np.array(signal)})
 
-def generateData():
+def generateData(args):
     # are we using this?
     #gtf = importGtf(args.gtfPath)
-    npA = load_nanopolish(args.npA)[0:1000]
-    npB = load_nanopolish(args.npB)[0:1000]
-    model = pd.read_csv('../data-files/model_kmer.csv')    
+    npA = load_nanopolish(args.npA)#[0:600]
+    npB = load_nanopolish(args.npB)#[0:600]
     # define index and find shared entries
     npA.index = pd.MultiIndex.from_arrays(npA[['reference_kmer','position']].values.T)
     npB.index = pd.MultiIndex.from_arrays(npB[['reference_kmer','position']].values.T)
@@ -259,64 +265,91 @@ def generateData():
     npB = npB[pcolB]
     ## compute statistic tests on the eventalign-row kmer means
     # t stat is pos when A > B and neg when B > A
-    npA[['tstat_model','pval_model']] = npA.progress_apply(lambda x: test_np_row_model(x, model), axis=1)
-    npB[['tstat_model','pval_model']] = npB.progress_apply(lambda x: test_np_row_model(x, model), axis=1)
+    npA[['tstat_model','pval_model']] = npA.progress_apply(lambda x: test_np_row_model(x), axis=1)
+    npB[['tstat_model','pval_model']] = npB.progress_apply(lambda x: test_np_row_model(x), axis=1)
     npA[['tstat_comp','pval_comp']] = npA.progress_apply(lambda x: test_np_row_row(x, npB), axis=1)
     npB[['tstat_comp','pval_comp']] = npB.progress_apply(lambda x: test_np_row_row(x, npA), axis=1)  
     return npA, npB
 
-def processRow(x):
-    ### 
-    data = parseCIGARsubsetF5(x)
-    kmer = x.reference_kmer.replace("U","T")
-    pairs = {"A":"T", "C":"G", "G":"C","U":"A" }
-    seq = ''.join([pairs[b] for b in data.sequence])
-    matches = find_indices_of_substring(seq, kmer)
+def getKmerVoltage(x):
+    # get read-level seq and sig
+    seq = x['seq']
+    sig = x['sig']
+    ########### row-level
+    pos = int(x['position']-x['mapping_pos'])
+    posS = pos
+    posE = pos+5
+    kmer = seq[posS:posE]
+    # NOTE: this will missmatch by a kmer ish sometimes, we are ignoring it to save my sanity
+    #if x['reference_kmer'] != kmer:
+        #
+    return sig[posS:posE]
 
-#def main(argv=sys.argv):
-if True:
-    argv=sys.argv
+def main(argv=sys.argv):
+#if True:
+#    argv=sys.argv
     ###
     args = getArgs(argv)
-
+    ### output storage
     if not os.path.exists(args.outputDir):
         os.mkdir(args.outputDir)
 
     ############### load data
-    npAu, npBu = generateData()
+    npAu, npBu = generateData(args)
     ## filter out unsuccessful alignment 
     npAu = npAu[npAu['reference_kmer'] == npAu['model_kmer']]
     npBu = npAu[npAu['reference_kmer'] == npAu['model_kmer']]
 
-    #### filter for significantly different from the model AND from each other
-    #pcut = 0.01
-    #npA = npAu.loc[(npAu['pval_model'] < pcut) & (npAu['pval_comp'] < pcut)]
-    #npB = npBu.loc[(npBu['pval_model'] < pcut) & (npBu['pval_comp'] < pcut)]
+    #### filter for significantly different from the model
+    pcut = 0.01
+    npA = npAu.loc[(npAu['pval_model'] < pcut)]
+    npB = npBu.loc[(npBu['pval_model'] < pcut)]
 
     ################################################
-    ##################### get f5 ###################
+    ########### get sequence metadata ##############
     ################################################
     # get readnames
     npAs = load_nanopolish_summary(args.npAsum)
     npBs = load_nanopolish_summary(args.npBsum)
     npA = npAu.merge(npAs, on='read_index', how='outer').dropna()
     npB = npBu.merge(npBs, on='read_index', how='outer').dropna()
+    #
+    del npAu, npBu
     # get mapping pos
     bamA = pysam.AlignmentFile(args.bamPathA, 'rb')
     bamB = pysam.AlignmentFile(args.bamPathB, 'rb')
-    mpA = extractMappingPos(bamA, npA)
-    mpB = extractMappingPos(bamB, npB)
-    npA.insert(loc=len(npA.columns), column='cigar', value=mpA)
-    npB.insert(loc=len(npB.columns), column='cigar', value=mpB)
+    cigA, mpA = extractCigarMappos(bamA)
+    cigB, mpB = extractCigarMappos(bamB)
+    npA.insert(loc=len(npA.columns), column='mapping_pos', value=npA['read_name'].map(mpA))
+    npB.insert(loc=len(npB.columns), column='mapping_pos', value=npB['read_name'].map(mpB))
+    npA.insert(loc=len(npA.columns), column='cigar', value=npA['read_name'].map(cigA))
+    npB.insert(loc=len(npB.columns), column='cigar', value=npB['read_name'].map(cigB))
+    #
+    del bamA, bamB, cigA, cigB, mpA, mpB
+    ################################################
+    ############# get voltage data #################
+    ################################################
+    # full size and cig only needs to be done once per read
+    npA[['seq', 'sig']] = npA.progress_apply(lambda x: getCIGARsubsetF5(x), axis=1)
+    npB[['seq', 'sig']] = npB.progress_apply(lambda x: getCIGARsubsetF5(x), axis=1)
+    # get kmer-level signals
+    npA.insert(loc=len(npA.columns), column='signal', value = npA.progress_apply(lambda x: getKmerVoltage(x), axis=1))
+    npB.insert(loc=len(npB.columns), column='signal', value = npB.progress_apply(lambda x: getKmerVoltage(x), axis=1))
+    # clean up intermediary cols
+    # mapping
+    del readSetA, readSetB, npA['cigar'], npB['cigar'], npA['mapping_pos'], npB['mapping_pos']
+    # fast5
+    del npA['seq'], npB['seq'], npA['sig'], npB['sig']
+    
+    ###################################################################
+    ######################### WRITE OUT ###############################
+    ###################################################################
+    npA.write_csv(os.file.path(args.outputDir, "Atable.csv"))
+    npB.write_csv(os.file.path(args.outputDir, "Btable.csv"))
 
+if __name__=="__main__":
+    main(sys.argv)
 
-    row = npA.iloc[98]
-    seq, sig = parseCIGARsubsetF5(row)
-    kmer = row['model_kmer'].replace("T", "U")
-    hits = find_indices_of_substring(seq, kmer)
-
-#if __name__=="__main__":
-#    main(sys.argv)
 
 
 
