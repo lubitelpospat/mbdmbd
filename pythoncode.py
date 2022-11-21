@@ -11,7 +11,6 @@ from dask import dataframe as dd
 from dask import compute
 # bars
 from tqdm import tqdm
-tqdm.pandas()
 from dask.diagnostics import ProgressBar
 # plots
 import matplotlib.pyplot as plt
@@ -19,6 +18,7 @@ from matplotlib import colors
 from matplotlib.ticker import PercentFormatter
 # stats
 from scipy import stats
+from Levenshtein import distance
 # specialized datatypes
 import h5py
 import pysam
@@ -39,7 +39,7 @@ def getArgs(argv):
     required_args.add_argument('--gtf', dest='gtfPath', required=True, help='the gtf which maps transcriptome to genome')
     required_args.add_argument('--output', dest='outputDir', required=True, help='where the output files are to be stored')
     ### optional
-    optional_args.add_argument('--verbose', dest='verbose', default=0, type=int, help='verbosity, 0 is silent, 1 is loud')
+    optional_args.add_argument('--verbose', dest='verbose', action='store_true', help='call this to make program loud')
     ################
     parser._action_groups.append(optional_args)
     parser.set_defaults()
@@ -78,7 +78,7 @@ def importGtf(path):
                     rows.append(row)
     return pd.concat(rows)
 
-def load_nanopolish(path):
+def load_nanopolish(path, verbose):
     ###### nanopolish #######
     ##### cols as follows ###
     # contig	position	reference_kmer	read_index	strand	
@@ -120,18 +120,23 @@ def load_nanopolish(path):
         dtype=col_typedict, 
         #low_memory=True,
         blocksize=25e6)
+    if verbose:
+        print('loading nanopolish')
     with ProgressBar():
         npAny = npdd.compute()
     return npAny
 
-def load_nanopolish_summary(path):
+def load_nanopolish_summary(path, verbose):
     ###### nanopolish summary #######
     # read_index	read_name	fast5_path	model_name	
+
     # strand	num_eventsnum_steps	num_skips	num_stays	
     # total_duration	shift	scale	drift	var
     col_list = ["read_index", "read_name", "fast5_path"]
     col_typedict = {'read_index': int, 'read_name': str, 'fast5_path': str}
     nps = dd.read_csv(path, delimiter='\t', usecols = col_list, dtype=col_typedict, low_memory=True)
+    if verbose:
+        print('loading nanopolish summary')
     with ProgressBar():
         npsOut = nps.compute()
     return npsOut
@@ -193,7 +198,7 @@ def extractFast5data(x):
     move = f[rn]['Analyses']['Basecall_1D_001']['BaseCalled_template']['Move'][...]
     return pd.Series(data={'sequence': sequence, 'f5signal': trace, 'f5segmentation': move})
 
-def getCIGARsubsetF5(x):
+def parseCIGARindices(cigar):
     # 6. CIGAR: CIGAR string. The CIGAR operations are given in the following table (set ‘*’ if unavailable):
     # Op BAM  Description                              Consumes-query  Consumes-reference
     # M 0   alignment match (can be a sequence match or mismatch)   yes yes
@@ -207,13 +212,10 @@ def getCIGARsubsetF5(x):
     # X 8   sequence mismatch yes yes
     ########################################################################
     ### Sum of lengths of the M/I/S/=/X operations shall equal the length of SEQ
-    f5data = extractFast5data(x)
-    # loop over each cigar op, apply it to the full seq string, produce the alignment string
     strindex = []
     # this tracks the position in ref and read, it's what we build index from
-    read_cursor = 0
-    ref_cursor = 0
-    for c in Cigar(x['cigar']).items():
+    ref_cursor = 1
+    for c in Cigar(cigar).items():
         # number and opcode
         N, Op = c
         ############################################
@@ -222,26 +224,35 @@ def getCIGARsubsetF5(x):
         if Op == 'M':
             # since this is match we just append +1 repeatedly
             for i in range(N):
-                ref_cursor += 1
-                read_cursor += 1
                 strindex.append(ref_cursor)
+                ref_cursor += 1
         elif Op == 'D':
             # gap in the ref
             ref_cursor += N
         elif Op == 'I':
             # gap in the read
-            read_cursor += N
+            ref_cursor += N
         elif Op == 'S':
             # used in soft clipping, so the whole-ass seq is in bam but we ignore N of it
             ref_cursor += N
         elif Op == 'H':
             # for Hard clipping, so the truncated seq appears in bam
             print("I hope this doesn't print because then it means I don't understand something")
-        else: 
+        elif Op == 'N':
+            # skipped region from ref
+            ref_cursor += N
+        else:
             print("oh no, unrecognized cigar op: " + Op)
+    return strindex
+
+def getCIGARsubsetF5(x):
+    f5data = extractFast5data(x)
+    # loop over each cigar op, apply it to the full seq string, produce the alignment string
+    strindex = parseCIGARindices(x['cigar'])
     ####### apply strindex
     sequence = ''
     signal = []
+    #print(f5data.sequence, x['cigar'], strindex)
     for i in strindex:
         sequence = sequence + f5data.sequence[i]
         signal.append(f5data.f5signal[f5data.f5segmentation == 1][i])
@@ -250,14 +261,16 @@ def getCIGARsubsetF5(x):
     seqDNA = ''.join([pairs[b] for b in sequence])
     return pd.Series(data={'str': seqDNA, 'sig': np.array(signal)})
 
-def generateData(args):
+def generateNanopolishData(args):
     # are we using this?
     #gtf = importGtf(args.gtfPath)
-    npA = load_nanopolish(args.npA)#[0:600]
-    npB = load_nanopolish(args.npB)#[0:600]
+    npA = load_nanopolish(args.npA, args.verbose)[1000:1600]
+    npB = load_nanopolish(args.npB, args.verbose)[1000:1600]
     # define index and find shared entries
     npA.index = pd.MultiIndex.from_arrays(npA[['reference_kmer','position']].values.T)
     npB.index = pd.MultiIndex.from_arrays(npB[['reference_kmer','position']].values.T)
+    if args.verbose:
+        print('filtering for shared genome locations')
     pcolA = npA.progress_apply(lambda x: isInPair(x, npB), axis=1)
     pcolB = npB.progress_apply(lambda x: isInPair(x, npA), axis=1)
     # subset for only mutually shared entries
@@ -265,37 +278,56 @@ def generateData(args):
     npB = npB[pcolB]
     ## compute statistic tests on the eventalign-row kmer means
     # t stat is pos when A > B and neg when B > A
+    if args.verbose:
+        print('doing row-wise stat test event against model')
     npA[['tstat_model','pval_model']] = npA.progress_apply(lambda x: test_np_row_model(x), axis=1)
     npB[['tstat_model','pval_model']] = npB.progress_apply(lambda x: test_np_row_model(x), axis=1)
+    if args.verbose:
+        print('doing row-wise stat test event against the other dataframes event')
     npA[['tstat_comp','pval_comp']] = npA.progress_apply(lambda x: test_np_row_row(x, npB), axis=1)
     npB[['tstat_comp','pval_comp']] = npB.progress_apply(lambda x: test_np_row_row(x, npA), axis=1)  
     return npA, npB
 
-def getKmerVoltage(x):
+def getKmerVoltage(x, verbose):
     # get read-level seq and sig
     seq = x['seq']
     sig = x['sig']
     ########### row-level
-    pos = int(x['position']-x['mapping_pos'])
+    pos = int(x['position'] - x['mapping_pos'])
+    # 5 base buffer in cigar seq
     posS = pos
-    posE = pos+5
+    posE = posS+5
     kmer = seq[posS:posE]
-    # NOTE: this will missmatch by a kmer ish sometimes, we are ignoring it to save my sanity
-    #if x['reference_kmer'] != kmer:
-        #
-    return sig[posS:posE]
+    ## trying to ensure match
+    gave_up = False
+    # letting leve distance of 1 go by 
+    if (x['reference_kmer'] != kmer) & (distance(x['reference_kmer'],kmer) > 1):
+        # give up
+        gave_up = True
+        if verbose:
+            print("kmer missmatch: {}, {}, {}, {}, {}".format(x['read_name'], x['contig'], x['position'], x['reference_kmer'], kmer))
+            print("leve dist: {}".format(distance(x['reference_kmer'],kmer)))
+            print("cigseq: {}, pos {}".format(seq, pos))
+    if not gave_up:
+        return sig[posS:posE]
+    else:
+        return
 
-def main(argv=sys.argv):
-#if True:
-#    argv=sys.argv
+#def main(argv=sys.argv):
+if True:
+    argv=sys.argv
     ###
     args = getArgs(argv)
+    # set bars verbosity 
+    tqdm.pandas(disable = not args.verbose)
     ### output storage
     if not os.path.exists(args.outputDir):
         os.mkdir(args.outputDir)
 
     ############### load data
-    npAu, npBu = generateData(args)
+    npAu, npBu = generateNanopolishData(args)
+    bamA = pysam.AlignmentFile(args.bamPathA, 'rb')
+    bamB = pysam.AlignmentFile(args.bamPathB, 'rb')
     ## filter out unsuccessful alignment 
     npAu = npAu[npAu['reference_kmer'] == npAu['model_kmer']]
     npBu = npAu[npAu['reference_kmer'] == npAu['model_kmer']]
@@ -309,15 +341,16 @@ def main(argv=sys.argv):
     ########### get sequence metadata ##############
     ################################################
     # get readnames
-    npAs = load_nanopolish_summary(args.npAsum)
-    npBs = load_nanopolish_summary(args.npBsum)
+    npAs = load_nanopolish_summary(args.npAsum, args.verbose)
+    npBs = load_nanopolish_summary(args.npBsum, args.verbose)
     npA = npAu.merge(npAs, on='read_index', how='outer').dropna()
     npB = npBu.merge(npBs, on='read_index', how='outer').dropna()
     #
-    del npAu, npBu
+    #del npAu, npBu
     # get mapping pos
-    bamA = pysam.AlignmentFile(args.bamPathA, 'rb')
-    bamB = pysam.AlignmentFile(args.bamPathB, 'rb')
+    if args.verbose:
+        print('extracting bam alignment data')
+    # dicts w/ key: readname, val: cigarstring & mapping pos respectively
     cigA, mpA = extractCigarMappos(bamA)
     cigB, mpB = extractCigarMappos(bamB)
     npA.insert(loc=len(npA.columns), column='mapping_pos', value=npA['read_name'].map(mpA))
@@ -325,30 +358,43 @@ def main(argv=sys.argv):
     npA.insert(loc=len(npA.columns), column='cigar', value=npA['read_name'].map(cigA))
     npB.insert(loc=len(npB.columns), column='cigar', value=npB['read_name'].map(cigB))
     #
-    del bamA, bamB, cigA, cigB, mpA, mpB
+    #del cigA, cigB, mpA, mpB
     ################################################
     ############# get voltage data #################
     ################################################
     # full size and cig only needs to be done once per read
-    npA[['seq', 'sig']] = npA.progress_apply(lambda x: getCIGARsubsetF5(x), axis=1)
-    npB[['seq', 'sig']] = npB.progress_apply(lambda x: getCIGARsubsetF5(x), axis=1)
+    if args.verbose:
+        print('getting sequence-level signal and bases')
+    readsetA = npA[['read_name', 'fast5_path', 'cigar']].drop_duplicates()
+    readsetB = npB[['read_name', 'fast5_path', 'cigar']].drop_duplicates()
+    readsetA[['seq', 'sig']] = readsetA.progress_apply(lambda x: getCIGARsubsetF5(x), axis=1)
+    readsetB[['seq', 'sig']] = readsetB.progress_apply(lambda x: getCIGARsubsetF5(x), axis=1)
+    #del readsetA['fast5_path'], readsetA['cigar'], readsetB['fast5_path'], readsetB['cigar']
+    npA = npA.merge(readsetA, on='read_name', how='outer')
+    npB = npB.merge(readsetB, on='read_name', how='outer')
     # get kmer-level signals
-    npA.insert(loc=len(npA.columns), column='signal', value = npA.progress_apply(lambda x: getKmerVoltage(x), axis=1))
-    npB.insert(loc=len(npB.columns), column='signal', value = npB.progress_apply(lambda x: getKmerVoltage(x), axis=1))
+    if args.verbose:
+        print('reducing to kmer-level signal')
+    signalA = npA.progress_apply(lambda x: getKmerVoltage(x, args.verbose), axis=1)
+    signalB = npB.progress_apply(lambda x: getKmerVoltage(x, args.verbose), axis=1)
+    exit()
+    npA.insert(loc=len(npA.columns), column='signal', value = signalA)
+    npB.insert(loc=len(npB.columns), column='signal', value = signalB)
     # clean up intermediary cols
     # mapping
-    del readSetA, readSetB, npA['cigar'], npB['cigar'], npA['mapping_pos'], npB['mapping_pos']
+    #del readsetA, readsetB, npA['cigar'], npB['cigar'], npA['mapping_pos'], npB['mapping_pos']
     # fast5
-    del npA['seq'], npB['seq'], npA['sig'], npB['sig']
-    
+    #del npA['seq'], npB['seq'], npA['sig'], npB['sig']
     ###################################################################
     ######################### WRITE OUT ###############################
     ###################################################################
-    npA.write_csv(os.file.path(args.outputDir, "Atable.csv"))
-    npB.write_csv(os.file.path(args.outputDir, "Btable.csv"))
+    if args.verbose:
+        print('writing to file')
+    npA.to_csv(os.path(args.outputDir, "Atable.csv"))
+    npB.to_csv(os.path(args.outputDir, "Btable.csv"))
 
-if __name__=="__main__":
-    main(sys.argv)
+#if __name__=="__main__":
+#    main(sys.argv)
 
 
 
