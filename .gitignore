@@ -2,5 +2,8 @@
 # IGNORE the data files they big
 /data-files
 /pyout/*
-# and this, if we use it
-/pipeline
+/pipeline/m6anet/
+/pipeline/output/
+/pipeline/work
+.Rproj.user
+/pipeline/.nextflow/

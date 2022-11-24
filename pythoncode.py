@@ -36,7 +36,6 @@ def getArgs(argv):
     required_args.add_argument('--npb', dest='npB', required=True, help='nanopolish eventalign table B')    
     required_args.add_argument('--npbs', dest='npBsum', required=True, help='nanopolish summary B')
     required_args.add_argument('--bamb', dest='bamPathB', required=True, help='bamfile B for getting mapping position')
-    required_args.add_argument('--gtf', dest='gtfPath', required=True, help='the gtf which maps transcriptome to genome')
     required_args.add_argument('--output', dest='outputDir', required=True, help='where the output files are to be stored')
     ### optional
     optional_args.add_argument('--verbose', dest='verbose', action='store_true', help='call this to make program loud')
@@ -44,39 +43,6 @@ def getArgs(argv):
     parser._action_groups.append(optional_args)
     parser.set_defaults()
     return parser.parse_args(argv[1:])
-
-def importGtf(path):
-    ###### gtf #######
-    num_lines = sum(1 for line in open(path, 'r'))
-    rows = []
-    with open(path, 'r') as f:
-        for idx, line in enumerate(tqdm(f, total=num_lines)):
-            # skip header and only get exons
-            if idx > 4:
-                if line.split('\t')[2] == "exon":
-                    start = line.split('\t')[3]
-                    end = line.split('\t')[4]
-                    strand = line.split('\t')[6]
-                    fields = line.split('\t')[8]
-                    for f in fields.split("; "):
-                        if f.split(' ')[0] == "gene_id":
-                            gene = f.split(' ')[1].strip('\"')
-                        if f.split(' ')[0] == "transcript_id":
-                            transcript = f.split(' ')[1].strip('\"')
-                        if f.split(' ')[0] == "exon_number":
-                            exon_num = f.split(' ')[1].strip('\"')
-                    ## build row
-                    row = pd.Series(data={
-                        'geneID': gene,
-                        'transcriptID': transcript,
-                        'start': start,
-                        'end': end,
-                        'strand': strand,
-                        'exon_number': exon_num
-                    })
-                    ## send to list
-                    rows.append(row)
-    return pd.concat(rows)
 
 def load_nanopolish(path, verbose):
     ###### nanopolish #######
@@ -129,7 +95,6 @@ def load_nanopolish(path, verbose):
 def load_nanopolish_summary(path, verbose):
     ###### nanopolish summary #######
     # read_index	read_name	fast5_path	model_name	
-
     # strand	num_eventsnum_steps	num_skips	num_stays	
     # total_duration	shift	scale	drift	var
     col_list = ["read_index", "read_name", "fast5_path"]
@@ -178,101 +143,131 @@ def test_np_row_row(x, yDF):
 def find_indices_of_substring(fs, ss):
     return [index for index in range(len(fs)) if fs.startswith(ss, index)]
 
-def isInPair(x, npAny):
+def is_in_pair(x, npAny):
     return any(x.name == npAny.index)
 
-def extractCigarMappos(bam):
-    cigarHolder = dict()
-    mappingPosHolder = dict()
+def extract_bam_data(bam):
+    # making pd df for this
+    seriesList = []
     for read in tqdm(bam.fetch(until_eof=True)):
-        if not read.is_secondary | read.is_supplementary:
-            cigarHolder[str(read.qname)] = str(read.cigarstring)
-            mappingPosHolder[str(read.qname)] = int(str(read).split('\t')[3])
-    return cigarHolder, mappingPosHolder
-
-def extractFast5data(x):
+        # https://github.com/pysam-developers/pysam/blob/cb3443959ca0a4d93f646c078f31d5966c0b82eb/pysam/libcalignedsegment.pyx#L1845
+        read_name = str(read.qname)
+        ref_name = str(read.reference_name)
+        qend = read.qstart + len(read.query_alignment_sequence)
+        series = pd.Series(data={'read_name': read_name, 
+                                'contig': ref_name, 
+                                'query_start': read.qstart, 
+                                'query_end': qend, 
+                                'ref_start': read.reference_start,
+                                'query_seq': read.query_sequence,
+                                'cigar': read.cigarstring})
+        seriesList.append(series)
+    return pd.concat(seriesList, axis=1).T
+    
+def extract_f5_data(x):
     rn = "read_" + x['read_name']
     f = h5py.File(x['fast5_path'], 'r')
     sequence = str(f[rn]['Analyses']['Basecall_1D_001']['BaseCalled_template']['Fastq'][...]).split("\\n")[1]
     trace = f[rn]['Analyses']['Basecall_1D_001']['BaseCalled_template']['Trace'][...]
     move = f[rn]['Analyses']['Basecall_1D_001']['BaseCalled_template']['Move'][...]
-    return pd.Series(data={'sequence': sequence, 'f5signal': trace, 'f5segmentation': move})
+    # return trace where move == 1, so we only get basecalls present in the seq
+    return pd.Series(data={'sequence': sequence.replace("U","T"), 'signal': trace[move==1]})
 
-def parseCIGARindices(cigar):
-    # 6. CIGAR: CIGAR string. The CIGAR operations are given in the following table (set ‘*’ if unavailable):
-    # Op BAM  Description                              Consumes-query  Consumes-reference
-    # M 0   alignment match (can be a sequence match or mismatch)   yes yes
-    # I 1   insertion to the reference                              yes  no
-    # D 2   deletion from the reference                             no  yes
-    # N 3   skipped region from the reference                       no  yes
-    # S 4   soft clipping (clipped sequences present in SEQ)        yes no
-    # H 5   hard clipping (clipped sequences NOT present in SEQ)    no no
-    # P 6   padding (silent deletion from padded reference)         no  no
-    # = 7   sequence match yes yes
-    # X 8   sequence mismatch yes yes
-    ########################################################################
-    ### Sum of lengths of the M/I/S/=/X operations shall equal the length of SEQ
+def interpret_cigar(x):
+    # COLUMNS: ["read_name","contig","query_start","query_end","ref_start",
+    # "query_seq","cigar","fast5_path","sequence","signal","position","np_seq"]
+    cigar = x['cigar']
     strindex = []
-    # this tracks the position in ref and read, it's what we build index from
-    ref_cursor = 1
+    cursor = 0
     for c in Cigar(cigar).items():
-        # number and opcode
         N, Op = c
-        ############################################
-        ############## handle opcodes ##############
-        ############################################
-        if Op == 'M':
-            # since this is match we just append +1 repeatedly
+        #### handle op
+        if Op == "M":
+            # since this is a match we append +1 repeatedly
             for i in range(N):
-                strindex.append(ref_cursor)
-                ref_cursor += 1
+                strindex.append(cursor)
+                cursor += 1
         elif Op == 'D':
-            # gap in the ref
-            ref_cursor += N
+            # deletion in ref, ignore
+            continue
         elif Op == 'I':
-            # gap in the read
-            ref_cursor += N
+            # instertion in read, dupe prev
+            # might need to N-1
+            for i in range(N):
+                strindex.append(cursor)
         elif Op == 'S':
-            # used in soft clipping, so the whole-ass seq is in bam but we ignore N of it
-            ref_cursor += N
+            # soft clipping
+            cursor += N
         elif Op == 'H':
-            # for Hard clipping, so the truncated seq appears in bam
-            print("I hope this doesn't print because then it means I don't understand something")
+            # hard clipping, we ignore
+            continue
         elif Op == 'N':
-            # skipped region from ref
-            ref_cursor += N
+            # skip ref region, same as S?
+            cursor += N
         else:
-            print("oh no, unrecognized cigar op: " + Op)
+            print("yikes we got an unrecognized cigar Op: " + Op)
+    # return strindex
+    # seq    CCGA
+    # np_seq CCGGA
+    seq = ''
+    for i in range(len(x['np_seq'])):
+        ref_i = strindex[i]
+        refbase = x['sequence'][ref_i]
+        npbase = x['np_seq'][i]
+        if refbase == npbase:
+            seq += refbase
+        else:
+            if x['sequence'][strindex[i-1]] == npbase:
+                strindex.insert(i-1, strindex[i-1])
+            else:
+                print("help")
+    print(seq)
+    print(strindex)
     return strindex
 
-def getCIGARsubsetF5(x):
-    f5data = extractFast5data(x)
-    # loop over each cigar op, apply it to the full seq string, produce the alignment string
-    strindex = parseCIGARindices(x['cigar'])
-    ####### apply strindex
-    sequence = ''
-    signal = []
-    #print(f5data.sequence, x['cigar'], strindex)
-    for i in strindex:
-        sequence = sequence + f5data.sequence[i]
-        signal.append(f5data.f5signal[f5data.f5segmentation == 1][i])
-    # convert seq to dna
-    pairs = { "A":"A", "C":"C", "G":"G", "U":"T" }
-    seqDNA = ''.join([pairs[b] for b in sequence])
-    return pd.Series(data={'str': seqDNA, 'sig': np.array(signal)})
+def apply_strindex(x):
+    seqH = []
+    sig = []
+    for i in x['cigind']:
+        seqH.append(x['sequence'][i])
+        sig.append(x['signal'][i])
+    seq = ''.join(seqH)
+    return pd.Series(data={ 'sequence': seq, 'signal': sig })
 
-def generateNanopolishData(args):
-    # are we using this?
-    #gtf = importGtf(args.gtfPath)
-    npA = load_nanopolish(args.npA, args.verbose)[1000:1600]
-    npB = load_nanopolish(args.npB, args.verbose)[1000:1600]
+def get_kmer_subset(x):
+    # COLUMNS: ["read_name","contig","position","reference_kmer",
+    # "query_start","query_end","ref_start","cigar",
+    # "fast5_path","sequence","signal"]
+    pos = int(x['position']-x['ref_start'])
+    kmer = x['sequence'][pos:pos+5]
+    sig = x['signal'][pos:pos+5]
+    if kmer != x['reference_kmer']:
+        print("kmer missmatch, {}, {}, {},  ref: {} target: {}".format(
+            x['read_name'],
+            x['contig'],
+            x['position'],
+            x['reference_kmer'],
+            kmer))
+    return pd.Series(data={ 'kmer': kmer,'sig': sig})
+
+def build_np_seq(x):
+    lastpos = max(x['position'])
+    # combine first base of kmers
+    seq = ''.join([b[0] for b in x['reference_kmer']])
+    # add last 4
+    lastkmer = str(x[x['position']==lastpos]['reference_kmer'].values[0][1:5])
+    return seq + lastkmer
+
+def generate_nanopolish_data(args):
+    npA = load_nanopolish(args.npA, args.verbose)[0:2500]
+    npB = load_nanopolish(args.npB, args.verbose)[0:2500]
     # define index and find shared entries
     npA.index = pd.MultiIndex.from_arrays(npA[['reference_kmer','position']].values.T)
     npB.index = pd.MultiIndex.from_arrays(npB[['reference_kmer','position']].values.T)
     if args.verbose:
         print('filtering for shared genome locations')
-    pcolA = npA.progress_apply(lambda x: isInPair(x, npB), axis=1)
-    pcolB = npB.progress_apply(lambda x: isInPair(x, npA), axis=1)
+    pcolA = npA.progress_apply(lambda x: is_in_pair(x, npB), axis=1)
+    pcolB = npB.progress_apply(lambda x: is_in_pair(x, npA), axis=1)
     # subset for only mutually shared entries
     npA = npA[pcolA]
     npB = npB[pcolB]
@@ -288,31 +283,6 @@ def generateNanopolishData(args):
     npB[['tstat_comp','pval_comp']] = npB.progress_apply(lambda x: test_np_row_row(x, npA), axis=1)  
     return npA, npB
 
-def getKmerVoltage(x, verbose):
-    # get read-level seq and sig
-    seq = x['seq']
-    sig = x['sig']
-    ########### row-level
-    pos = int(x['position'] - x['mapping_pos'])
-    # 5 base buffer in cigar seq
-    posS = pos
-    posE = posS+5
-    kmer = seq[posS:posE]
-    ## trying to ensure match
-    gave_up = False
-    # letting leve distance of 1 go by 
-    if (x['reference_kmer'] != kmer) & (distance(x['reference_kmer'],kmer) > 1):
-        # give up
-        gave_up = True
-        if verbose:
-            print("kmer missmatch: {}, {}, {}, {}, {}".format(x['read_name'], x['contig'], x['position'], x['reference_kmer'], kmer))
-            print("leve dist: {}".format(distance(x['reference_kmer'],kmer)))
-            print("cigseq: {}, pos {}".format(seq, pos))
-    if not gave_up:
-        return sig[posS:posE]
-    else:
-        return
-
 #def main(argv=sys.argv):
 if True:
     argv=sys.argv
@@ -325,9 +295,9 @@ if True:
         os.mkdir(args.outputDir)
 
     ############### load data
-    npAu, npBu = generateNanopolishData(args)
-    bamA = pysam.AlignmentFile(args.bamPathA, 'rb')
-    bamB = pysam.AlignmentFile(args.bamPathB, 'rb')
+    npAu, npBu = generate_nanopolish_data(args)
+    # COLUMNS: ["contig","position","strand","reference_kmer","model_kmer","read_index","event_level_mean",
+    # "event_stdv","event_length","model_mean","model_stdv","start_idx","end_idx"]
     ## filter out unsuccessful alignment 
     npAu = npAu[npAu['reference_kmer'] == npAu['model_kmer']]
     npBu = npAu[npAu['reference_kmer'] == npAu['model_kmer']]
@@ -336,7 +306,6 @@ if True:
     pcut = 0.01
     npA = npAu.loc[(npAu['pval_model'] < pcut)]
     npB = npBu.loc[(npBu['pval_model'] < pcut)]
-
     ################################################
     ########### get sequence metadata ##############
     ################################################
@@ -345,46 +314,76 @@ if True:
     npBs = load_nanopolish_summary(args.npBsum, args.verbose)
     npA = npAu.merge(npAs, on='read_index', how='outer').dropna()
     npB = npBu.merge(npBs, on='read_index', how='outer').dropna()
-    #
-    #del npAu, npBu
-    # get mapping pos
+    # COLUMNS: ["contig","position","strand","reference_kmer","model_kmer","read_index","event_level_mean",
+    # "event_stdv","event_length","model_mean","model_stdv","start_idx","end_idx", 
+    # NEW: "read_name","fast5_path"]
+    del npAu, npBu, npAs, npBs
+    ################################################
+    ############### get alignment data #############
+    ################################################
     if args.verbose:
         print('extracting bam alignment data')
-    # dicts w/ key: readname, val: cigarstring & mapping pos respectively
-    cigA, mpA = extractCigarMappos(bamA)
-    cigB, mpB = extractCigarMappos(bamB)
-    npA.insert(loc=len(npA.columns), column='mapping_pos', value=npA['read_name'].map(mpA))
-    npB.insert(loc=len(npB.columns), column='mapping_pos', value=npB['read_name'].map(mpB))
-    npA.insert(loc=len(npA.columns), column='cigar', value=npA['read_name'].map(cigA))
-    npB.insert(loc=len(npB.columns), column='cigar', value=npB['read_name'].map(cigB))
-    #
-    #del cigA, cigB, mpA, mpB
+    # dicts w/ key: (readname, refname), val: read to ref mapping pos
+    bamA = pysam.AlignmentFile(args.bamPathA, 'rb')
+    bamB = pysam.AlignmentFile(args.bamPathB, 'rb')
+    bamdfA = extract_bam_data(bamA)
+    bamdfB = extract_bam_data(bamB)
+    # COLUMNS: ["read_name","contig","query_start","query_end","ref_start","query_seq","cigar"]
     ################################################
     ############# get voltage data #################
     ################################################
     # full size and cig only needs to be done once per read
     if args.verbose:
         print('getting sequence-level signal and bases')
-    readsetA = npA[['read_name', 'fast5_path', 'cigar']].drop_duplicates()
-    readsetB = npB[['read_name', 'fast5_path', 'cigar']].drop_duplicates()
-    readsetA[['seq', 'sig']] = readsetA.progress_apply(lambda x: getCIGARsubsetF5(x), axis=1)
-    readsetB[['seq', 'sig']] = readsetB.progress_apply(lambda x: getCIGARsubsetF5(x), axis=1)
-    #del readsetA['fast5_path'], readsetA['cigar'], readsetB['fast5_path'], readsetB['cigar']
-    npA = npA.merge(readsetA, on='read_name', how='outer')
-    npB = npB.merge(readsetB, on='read_name', how='outer')
-    # get kmer-level signals
-    if args.verbose:
-        print('reducing to kmer-level signal')
-    signalA = npA.progress_apply(lambda x: getKmerVoltage(x, args.verbose), axis=1)
-    signalB = npB.progress_apply(lambda x: getKmerVoltage(x, args.verbose), axis=1)
+    readsetA = npA[['read_name', 'fast5_path']].drop_duplicates()
+    readsetB = npB[['read_name', 'fast5_path']].drop_duplicates()
+    readsetA[['sequence', 'signal']] = readsetA.progress_apply(lambda x: extract_f5_data(x), axis=1)
+    readsetB[['sequence', 'signal']] = readsetB.progress_apply(lambda x: extract_f5_data(x), axis=1)
+    # COLUMNS: ["read_name","fast5_path","sequence","signal"]
+    ########## merge ##########
+    rsA = bamdfA.merge(readsetA, on='read_name', how='outer').dropna()
+    #rsB = bamdfB.merge(readsetB, on='read_name', how='outer').dropna()
+    # COLUMNS: ["read_name","contig","query_start","query_end","ref_start","query_seq",
+    # "cigar","fast5_path","sequence","signal"]
+    #del bamA, bamB, bamdfA, bamdfB
+    ###############################################
+    ############## interpreting cigar #############
+    ###############################################
+    ########### first get the nanopolish sequence ############
+    # rename cols using this one weird trick, doctors hate him
+    def f(x):
+        try:
+            int(x)
+            return 'np_seq'
+        except ValueError:
+            return x
+    # afaik all we need is read_name, contig, position, reference_kmer
+    seqssA = npA[['read_name','contig','position','reference_kmer']]
+    #seqssB = npB[['read_name','contig','position','reference_kmer']]
+    npseqA = seqssA.drop_duplicates().groupby(['read_name', 'contig']).progress_apply(lambda x: build_np_seq(x)).reset_index().rename(columns=f)
+    #npseqB = seqssB.drop_duplicates().groupby(['read_name', 'contig']).progress_apply(lambda x: build_np_seq(x)).reset_index().rename(columns=f)
+    #begub
+    rsA = rsA[rsA['read_name']=='2fdb8afd-e3ba-4732-a2d7-9e7ef388e43f']
+    rsA = rsA.merge(npseqA, on=['read_name','contig'], how='outer').dropna()
+
+    # add np seqs
     exit()
-    npA.insert(loc=len(npA.columns), column='signal', value = signalA)
-    npB.insert(loc=len(npB.columns), column='signal', value = signalB)
-    # clean up intermediary cols
-    # mapping
-    #del readsetA, readsetB, npA['cigar'], npB['cigar'], npA['mapping_pos'], npB['mapping_pos']
-    # fast5
-    #del npA['seq'], npB['seq'], npA['sig'], npB['sig']
+    cigindA = rsA.progress_apply(lambda x: interpret_cigar(x), axis=1)
+    #cigindB = rsB.merge(npseqB, on=['read_name','contig'], how='outer').progress_apply(lambda x: interpret_cigar(x), axis=1)
+    rsA.insert(loc=len(rsA.columns), column='cigind', value=cigindA)
+    #rsB.insert(loc=len(rsB.columns), column='cigind', value=cigindB)
+    rsA[['sequence', 'signal']] = rsA.apply(lambda x: apply_strindex(x), axis=1)
+    #rsB[['sequence', 'signal']] = rsB.apply(lambda x: apply_strindex(x), axis=1)
+    ########################################################
+    ############## merge with np and get kmers #############
+    ########################################################
+    exit()
+    # build kmer seq
+    ksA = npA[['read_name','contig','position','reference_kmer']].merge(rsA, on=['read_name','contig'],how='outer').dropna()
+    ksA[['kmer', 'sig']] = ksA.progress_apply(lambda x: get_kmer_subset(x), axis=1)
+    #ksB = npB[['read_name','contig','position','reference_kmer']].merge(rsB, on=['read_name','contig'],how='outer').dropna()
+    #ksB[['kmer', 'sig']] = ksB.progress_apply(lambda x: get_kmer_subset(x), axis=1)
+    exit()
     ###################################################################
     ######################### WRITE OUT ###############################
     ###################################################################
