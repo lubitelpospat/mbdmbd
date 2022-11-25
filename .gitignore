@@ -7,3 +7,6 @@
 /pipeline/work
 .Rproj.user
 /pipeline/.nextflow/
+
+# Added by cargo
+/target
