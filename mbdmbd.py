@@ -58,7 +58,7 @@ if True:
     ############ iterate f5 file ###########
     ########################################
     big_list = []
-    for f5file in tqdm(glob.glob(os.path.join(args.f5dirA,"*"))):
+    for f5file in tqdm(glob.glob(args.f5dirA+"*.fast5")):
         f = h5py.File(f5file, 'r')
         for rn in f.keys():
             seq_all, sig_all = extract_f5_data(f, rn)
