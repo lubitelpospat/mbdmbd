@@ -32,6 +32,7 @@ def get_args(argv):
     # optional
     optional_args.add_argument('--verbose', dest='verbose', action='store_true', help='call this to make program loud')
     optional_args.add_argument('--targetbase', dest='targetBase', default='A', help='you can change which base is in the middle of NN.NN kmer motifs that we compare, default A')
+    optional_args.add_argument('--test', dest='test', action='store_true', help='run on only one fast5 as a test')
     ##########
     parser._action_groups.append(optional_args)
     parser.set_defaults()
@@ -54,11 +55,13 @@ if True:
     ### output storage
     if not os.path.exists(args.outDir):
         os.mkdir(args.outDir)
+    ### decide f5
+    f5str = "*_100.fast5" if args.test else "*.fast5"
     ########################################
     ############ iterate f5 file ###########
     ########################################
     big_list = []
-    for f5file in tqdm(glob.glob(args.f5dirA+"*.fast5")):
+    for f5file in tqdm(glob.glob(os.path.join(args.f5dirA,f5str))):
         f = h5py.File(f5file, 'r')
         for rn in f.keys():
             seq_all, sig_all = extract_f5_data(f, rn)
