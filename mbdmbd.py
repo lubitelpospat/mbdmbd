@@ -73,16 +73,25 @@ if True:
             if len(seq) != len(sig):
                 print("AVAST AND CURSES, ME VECTORS' LENGTHS ARE ASKEW")
             # make serieses
-            big_list.append(pd.DataFrame([pd.Series(data={'signal':sig[i],'kmer':seq[i],'read_name':rn,'seqloc':str(iw[i])}) for i in iw2]))
-    
-    kmer_table = pd.concat(big_list)
-    del big_list
-    exit()
+            big_list.append(pd.DataFrame([pd.Series(data={'signal':sig[i].flatten(),'kmer':seq[i],'read_name':rn,'seqloc':str(iw[i])}) for i in iw2]))
 
-    X = np.mean(np.mean(np.concatenate(big_sig), axis=1), axis=1)
-    plot = sns.histplot(X, bins=50)
+    kmer_table = pd.concat(big_list).reset_index()
+    del big_list, kmer_table['index']
+
+    kmer_subset = kmer_table[kmer_table['kmer']=='CGACG']
+
+    X = np.array([x for x in kmer_subset['signal']])
+    ### gmm ###
+    gmm = GaussianMixture(2, covariance_type='full', random_state=0).fit(X)
+    #kmer_subset['predicted_clust'] = gmm.predict(X)
+    #
+    ### plot for sanity checking ###
+    plotdata = pd.DataFrame(data={'signal_mean': np.mean(X, axis=1), 'cluster': gmm.predict(X)})
+    plot = sns.violinplot(data = plotdata, x='cluster', y='signal_mean')
+    plot.set(ylim=(31.725, 32.0))
     fig = plot.get_figure()
-    fig.savefig(os.path.join(args.outDir, "big-test.png"))
+    fig.savefig(os.path.join(args.outDir, "test_CGACG.png"))
+    exit()
 
 #if __name__=="__main__":
 #    main(sys.argv)
